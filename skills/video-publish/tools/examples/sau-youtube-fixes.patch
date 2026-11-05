@@ -1,0 +1,55 @@
+diff --git a/uploader/youtube_uploader/main.py b/uploader/youtube_uploader/main.py
+index 4a1b0e1..d18241e 100644
+--- a/uploader/youtube_uploader/main.py
++++ b/uploader/youtube_uploader/main.py
+@@ -49,14 +49,18 @@ def _build_login_result(success, status, message, account_file, current_url=""):
+ 
+ async def cookie_auth(account_file) -> bool:
+     """登录态是否仍有效：带 cookie 打开 Studio，没被踢到 Google 登录页且进入了频道页即有效。"""
++    # headless 时 Studio 不会跳到 /channel/（Google 识别无头浏览器），误判登录失效；改为有界面检查
+     async with async_playwright() as playwright:
+-        browser = await playwright.chromium.launch(headless=True, channel="chrome")
++        browser = await playwright.chromium.launch(headless=False, channel="chrome")
+         try:
+             context = await browser.new_context(storage_state=account_file)
+             context = await set_init_script(context)
+             page = await context.new_page()
+             await page.goto(STUDIO_URL, wait_until="domcontentloaded")
+-            await page.wait_for_timeout(3000)
++            try:  # Studio 跳到 /channel/ 常要 5 秒以上，原来固定等 3 秒会误判
++                await page.wait_for_url("**/channel/**", timeout=20000)
++            except Exception:
++                pass
+             url = page.url
+             if "accounts.google.com" in url or "/signin" in url.lower():
+                 return False
+@@ -247,12 +251,15 @@ class YouTubeVideo(BaseVideoUploader):
+         # 6) 加入播放列表（连载/系列追更）。弹窗务必关闭，否则挡住后续步骤。
+         if self.playlist:
+             try:
+-                await _click_if_present(
+-                    page, "#basics ytcp-text-dropdown-trigger, ytcp-video-metadata-playlists ytcp-dropdown-trigger", 8000)
+-                await page.wait_for_timeout(1200)
+-                existing = page.locator(
+-                    f"tp-yt-paper-checkbox:has-text('{self.playlist}'), "
+-                    f"ytcp-checkbox-group:has-text('{self.playlist}')").first
++                # 原选择器 "#basics ytcp-text-dropdown-trigger" 会点到别的下拉框，播放列表从没被选上；改为定位"Select playlists"按钮
++                opened = await _click_if_present(
++                    page, "ytcp-video-metadata-playlists [aria-label='Select playlists'], "
++                          "ytcp-video-metadata-playlists ytcp-dropdown-trigger, "
++                          "ytcp-video-metadata-playlists ytcp-text-dropdown-trigger", 8000)
++                if not opened:
++                    raise RuntimeError("找不到播放列表下拉框")
++                await page.wait_for_timeout(1500)
++                existing = page.locator("ytcp-playlist-dialog").get_by_text(self.playlist, exact=True).first
+                 if await existing.count():
+                     await existing.click()
+                 else:
+@@ -266,6 +273,7 @@ class YouTubeVideo(BaseVideoUploader):
+                             await _click_if_present(page, "ytcp-button#create-button, tp-yt-paper-dialog ytcp-button:has-text('Create'), tp-yt-paper-dialog ytcp-button:has-text('创建')", 4000)
+             except Exception as exc:
+                 youtube_logger.warning(_msg("⚠️", f"播放列表处理跳过（不影响发布）: {exc}"))
++                print("PLAYLIST_FAILED", flush=True)
+             finally:
+                 await _click_if_present(page, "ytcp-playlist-dialog #save-button, ytcp-button:has-text('Done'), ytcp-button:has-text('完成')", 3000)
+                 await page.keyboard.press("Escape")
